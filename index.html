@@ -1,0 +1,301 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>🥇🥈🥉</title>
+<style>
+  body {
+    font-family: system-ui, sans-serif;
+    max-width: 600px;
+    margin: 40px auto;
+    padding: 0 16px;
+  }
+  textarea {
+    width: 100%;
+    height: 200px;
+    font: inherit;
+    box-sizing: border-box;
+  }
+  button {
+    font: inherit;
+    font-size: 1.3em;
+    padding: 10px 16px;
+    cursor: pointer;
+  }
+  #choices {
+    display: flex;
+    gap: 12px;
+  }
+  .choice {
+    flex: 1;
+    padding: 24px 16px;
+    font-size: 1.1em;
+    overflow-wrap: anywhere;
+  }
+  .hidden { display: none; }
+  #progress { color: #666; margin-bottom: 12px; }
+  ol li { margin: 4px 0; }
+</style>
+</head>
+<body>
+
+<h1>🥇🥈🥉</h1>
+
+<div id="input-screen">
+  <textarea id="items" placeholder="🍎&#10;🍌&#10;🍒"></textarea>
+  <p><button onclick="start()" title="Start ranking">▶</button>
+  <button id="resume-btn" class="hidden" onclick="resume()" title="Resume previous session">💾▶</button></p>
+</div>
+
+<div id="question-screen" class="hidden">
+  <div id="progress"></div>
+  <div id="choices">
+    <button class="choice" id="choice-a"></button>
+    <button class="choice" id="choice-b"></button>
+  </div>
+  <p><button id="undo-btn" onclick="undo()" title="Undo">↩</button>
+  <button onclick="exportProgress()" title="Export progress">📤</button></p>
+</div>
+
+<div id="result-screen" class="hidden">
+  <h2 id="result-title"></h2>
+  <ol id="ranking"></ol>
+  <p id="export-note"></p>
+  <textarea id="export-text" readonly onclick="this.select()" title="Copy this to save your progress"></textarea>
+  <p><button id="continue-btn" class="hidden" onclick="ask()" title="Continue ranking">▶</button>
+  <button id="result-undo-btn" class="hidden" onclick="undo()" title="Undo last answer">↩</button>
+  <button onclick="location.reload()" title="Start over">↻</button></p>
+</div>
+
+<script>
+// Merge sort where all merges in a round run concurrently: each question is
+// drawn from a randomly chosen in-progress merge, so consecutive questions
+// rarely involve the same items.
+let runs = [];    // sorted runs (best first) waiting for the next round
+let tasks = [];   // in-progress merges: {a, b, ai, bi, out}
+let asked = 0;
+let history = [];  // snapshots taken before each answer, for undo
+let lastQ = null;  // which task/side the current question shows
+
+const STORAGE_KEY = 'ranker-state';
+
+function saveState() {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({ runs, tasks, asked }));
+  } catch (e) { /* storage unavailable; keep going without saving */ }
+}
+
+function resume() {
+  const state = JSON.parse(localStorage.getItem(STORAGE_KEY));
+  runs = state.runs;
+  tasks = state.tasks;
+  asked = state.asked;
+  history = [];
+  if (tasks.length === 0) {
+    startRound();
+  } else {
+    ask();
+  }
+}
+
+function show(id) {
+  for (const s of ['input-screen', 'question-screen', 'result-screen']) {
+    document.getElementById(s).classList.toggle('hidden', s !== id);
+  }
+}
+
+// worst-case comparison count for bottom-up merge sort over runs of given sizes
+function worstCase(sizes) {
+  let s = sizes.slice(), total = 0;
+  while (s.length > 1) {
+    const next = [];
+    for (let i = 0; i < s.length; i += 2) {
+      if (i + 1 < s.length) {
+        total += s[i] + s[i + 1] - 1;
+        next.push(s[i] + s[i + 1]);
+      } else {
+        next.push(s[i]);
+      }
+    }
+    s = next;
+  }
+  return total;
+}
+
+function start() {
+  const lines = document.getElementById('items').value
+    .split('\n').map(s => s.trim());
+  // "---" lines separate groups that are already ranked best-first (from an
+  // export); without any "---", every line is an unranked item
+  let groups = [];
+  if (lines.includes('---')) {
+    let cur = [];
+    for (const line of lines) {
+      if (line === '---') {
+        if (cur.length) groups.push(cur);
+        cur = [];
+      } else if (line) {
+        cur.push(line);
+      }
+    }
+    if (cur.length) groups.push(cur);
+  } else {
+    groups = lines.filter(s => s.length > 0).map(x => [x]);
+  }
+  if (groups.reduce((s, g) => s + g.length, 0) < 2) {
+    alert('≥ 2 ⚠️');
+    return;
+  }
+  // shuffle group order so pairings don't depend on paste order
+  for (let i = groups.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [groups[i], groups[j]] = [groups[j], groups[i]];
+  }
+  runs = groups;
+  tasks = [];
+  asked = 0;
+  history = [];
+  startRound();
+}
+
+function undo() {
+  if (history.length === 0) return;
+  const h = history.pop();
+  const s = JSON.parse(h.snap);
+  runs = s.runs;
+  tasks = s.tasks;
+  asked = s.asked;
+  ask({ qi: h.qi, aOnLeft: h.aOnLeft });  // re-show the exact same question
+}
+
+// worst-case questions left from the current state: finish each in-progress
+// merge, then merge-sort the resulting runs
+function remainingWorstCase() {
+  let rem = 0;
+  const sizes = runs.map(r => r.length);
+  for (const t of tasks) {
+    const ar = t.a.length - t.ai, br = t.b.length - t.bi;
+    rem += ar + br - 1;
+    sizes.push(t.out.length + ar + br);
+  }
+  return rem + worstCase(sizes);
+}
+
+function startRound() {
+  if (tasks.length === 0 && runs.length === 1) {
+    finish(runs[0]);
+    return;
+  }
+  const leftover = [];
+  tasks = [];
+  for (let i = 0; i < runs.length; i += 2) {
+    if (i + 1 < runs.length) {
+      tasks.push({ a: runs[i], b: runs[i + 1], ai: 0, bi: 0, out: [] });
+    } else {
+      leftover.push(runs[i]);
+    }
+  }
+  runs = leftover;
+  ask();
+}
+
+function ask(forced) {
+  saveState();
+  // retire merges where one side is exhausted
+  for (let i = tasks.length - 1; i >= 0; i--) {
+    const t = tasks[i];
+    if (t.ai >= t.a.length || t.bi >= t.b.length) {
+      t.out.push(...t.a.slice(t.ai), ...t.b.slice(t.bi));
+      runs.push(t.out);
+      tasks.splice(i, 1);
+    }
+  }
+  if (tasks.length === 0) {
+    startRound();
+    return;
+  }
+  const qi = forced ? forced.qi : Math.floor(Math.random() * tasks.length);
+  const t = tasks[qi];
+  const aOnLeft = forced ? forced.aOnLeft : Math.random() < 0.5;
+  lastQ = { qi, aOnLeft };
+  show('question-screen');
+  document.getElementById('undo-btn').disabled = history.length === 0;
+  document.getElementById('progress').textContent =
+    `❓ ${asked + 1} · ⏳ ≤ ${remainingWorstCase()}`;
+  const a = document.getElementById('choice-a');
+  const b = document.getElementById('choice-b');
+  const left = aOnLeft ? t.a[t.ai] : t.b[t.bi];
+  const right = aOnLeft ? t.b[t.bi] : t.a[t.ai];
+  a.textContent = left;
+  b.textContent = right;
+  a.onclick = () => answer(t, aOnLeft);
+  b.onclick = () => answer(t, !aOnLeft);
+}
+
+function answer(t, aWon) {
+  history.push({
+    snap: JSON.stringify({ runs, tasks, asked }),
+    qi: lastQ.qi,
+    aOnLeft: lastQ.aOnLeft,
+  });
+  asked++;
+  if (aWon) {
+    t.out.push(t.a[t.ai++]);
+  } else {
+    t.out.push(t.b[t.bi++]);
+  }
+  ask();
+}
+
+function finish(ranking) {
+  try { localStorage.removeItem(STORAGE_KEY); } catch (e) {}
+  showResult([ranking]);
+}
+
+function exportProgress() {
+  // snapshot everything as sorted runs; for an in-progress merge, out beats
+  // all of a's remainder, so out + a-remainder is one run and b-remainder
+  // is another (out-vs-b info is dropped and may get re-asked on resume)
+  const rs = runs.map(r => r.slice());
+  for (const t of tasks) {
+    const r1 = [...t.out, ...t.a.slice(t.ai)];
+    const r2 = t.b.slice(t.bi);
+    if (r1.length) rs.push(r1);
+    if (r2.length) rs.push(r2);
+  }
+  showResult(rs);
+}
+
+function showResult(rs) {
+  const complete = rs.length === 1;
+  document.getElementById('result-title').textContent =
+    complete ? '🏆' : '⏳';
+  const ol = document.getElementById('ranking');
+  ol.innerHTML = '';
+  if (complete) {
+    for (const item of rs[0]) {
+      const li = document.createElement('li');
+      li.textContent = item;
+      ol.appendChild(li);
+    }
+  }
+  document.getElementById('export-note').textContent =
+    complete ? '📋' : '📋 → 📥';
+  document.getElementById('export-text').value =
+    rs.map(r => r.join('\n')).join('\n---\n');
+  document.getElementById('continue-btn').classList.toggle('hidden', complete);
+  document.getElementById('result-undo-btn').classList.toggle(
+    'hidden', !(complete && history.length > 0));
+  show('result-screen');
+}
+
+try {
+  if (localStorage.getItem(STORAGE_KEY)) {
+    document.getElementById('resume-btn').classList.remove('hidden');
+  }
+} catch (e) {}
+</script>
+
+</body>
+</html>
