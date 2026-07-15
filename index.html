@@ -66,7 +66,8 @@
 
 <div id="input-screen">
   <textarea id="items" placeholder="🍎&#10;🍌&#10;🍒"></textarea>
-  <p><button onclick="start()" title="Start ranking">▶</button>
+  <p><button onclick="start('merge')" title="Start (varied questions, fewest total)">▶</button>
+  <button onclick="start('top')" title="Start top-first (best items ranked first — stop anytime)">🥇▶</button>
   <button id="resume-btn" class="hidden" onclick="resume()" title="Resume previous session">💾▶</button></p>
 </div>
 
@@ -85,7 +86,7 @@
   <ol id="ranking"></ol>
   <p id="export-note"></p>
   <textarea id="export-text" readonly onclick="this.select()" title="Copy this to save your progress"></textarea>
-  <p><button id="continue-btn" class="hidden" onclick="ask()" title="Continue ranking">▶</button>
+  <p><button id="continue-btn" class="hidden" onclick="continueRanking()" title="Continue ranking">▶</button>
   <button id="result-undo-btn" class="hidden" onclick="undo()" title="Undo last answer">↩</button>
   <button onclick="location.reload()" title="Start over">↻</button></p>
 </div>
@@ -94,28 +95,51 @@
 // Merge sort where all merges in a round run concurrently: each question is
 // drawn from a randomly chosen in-progress merge, so consecutive questions
 // rarely involve the same items.
-let runs = [];    // sorted runs (best first) waiting for the next round
-let tasks = [];   // in-progress merges: {a, b, ai, bi, out}
+let mode = 'merge';  // 'merge' (varied questions) or 'top' (best-first tournament)
+let runs = [];    // merge mode: sorted runs (best first) waiting for the next round
+let tasks = [];   // merge mode: in-progress merges: {a, b, ai, bi, out}
+let tree = null;  // top mode: tournament tree; leaf {run, pos}, node {l, r, w}
+let ranked = [];  // top mode: globally ranked items so far, best first
 let asked = 0;
 let history = [];  // snapshots taken before each answer, for undo
 let lastQ = null;  // which task/side the current question shows
 
 const STORAGE_KEY = 'ranker-state';
 
+function stateObj() {
+  return { mode, runs, tasks, tree, ranked, asked };
+}
+
+function restoreState(s) {
+  mode = s.mode || 'merge';
+  runs = s.runs || [];
+  tasks = s.tasks || [];
+  tree = s.tree || null;
+  ranked = s.ranked || [];
+  asked = s.asked || 0;
+}
+
 function saveState() {
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify({ runs, tasks, asked }));
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(stateObj()));
   } catch (e) { /* storage unavailable; keep going without saving */ }
 }
 
 function resume() {
-  const state = JSON.parse(localStorage.getItem(STORAGE_KEY));
-  runs = state.runs;
-  tasks = state.tasks;
-  asked = state.asked;
+  restoreState(JSON.parse(localStorage.getItem(STORAGE_KEY)));
   history = [];
-  if (tasks.length === 0) {
+  if (mode === 'top') {
+    askTop();
+  } else if (tasks.length === 0) {
     startRound();
+  } else {
+    ask();
+  }
+}
+
+function continueRanking() {
+  if (mode === 'top') {
+    askTop();
   } else {
     ask();
   }
@@ -145,7 +169,7 @@ function worstCase(sizes) {
   return total;
 }
 
-function start() {
+function start(m) {
   const lines = document.getElementById('items').value
     .split('\n').map(s => s.trim());
   // "---" lines separate groups that are already ranked best-first (from an
@@ -174,21 +198,45 @@ function start() {
     const j = Math.floor(Math.random() * (i + 1));
     [groups[i], groups[j]] = [groups[j], groups[i]];
   }
-  runs = groups;
-  tasks = [];
+  mode = m;
   asked = 0;
   history = [];
+  if (mode === 'top') {
+    // balanced tournament tree; each group is a pre-sorted leaf run
+    let nodes = groups.map(g => ({ run: g, pos: 0 }));
+    while (nodes.length > 1) {
+      const next = [];
+      for (let i = 0; i < nodes.length; i += 2) {
+        next.push(i + 1 < nodes.length
+          ? { l: nodes[i], r: nodes[i + 1], w: null }
+          : nodes[i]);
+      }
+      nodes = next;
+    }
+    tree = nodes[0];
+    ranked = [];
+    runs = [];
+    tasks = [];
+    askTop();
+    return;
+  }
+  runs = groups;
+  tasks = [];
+  tree = null;
+  ranked = [];
   startRound();
 }
 
 function undo() {
   if (history.length === 0) return;
   const h = history.pop();
-  const s = JSON.parse(h.snap);
-  runs = s.runs;
-  tasks = s.tasks;
-  asked = s.asked;
-  ask({ qi: h.qi, aOnLeft: h.aOnLeft });  // re-show the exact same question
+  restoreState(JSON.parse(h.snap));
+  const forced = { qi: h.qi, aOnLeft: h.aOnLeft };  // re-show the same question
+  if (mode === 'top') {
+    askTop(forced);
+  } else {
+    ask(forced);
+  }
 }
 
 // worst-case questions left from the current state: finish each in-progress
@@ -203,6 +251,110 @@ function remainingWorstCase() {
   }
   return rem + worstCase(sizes);
 }
+
+// ---- top-first (tournament) mode ----
+// Each internal node remembers which child won (w: 'L'/'R'/null). The tree's
+// value is the best not-yet-ranked item; resolving it costs one question per
+// unresolved node on the winner's path, so #1 costs ~n questions and each
+// subsequent item only ~log2(n) more.
+
+const UNKNOWN = Symbol();
+
+// best remaining item under nd: a string, null (exhausted), or UNKNOWN
+function val(nd) {
+  if (!nd.l) return nd.pos < nd.run.length ? nd.run[nd.pos] : null;
+  if (nd.w === 'L') return val(nd.l);
+  if (nd.w === 'R') return val(nd.r);
+  const a = val(nd.l), b = val(nd.r);
+  if (a === null) return b;
+  if (b === null) return a;
+  return UNKNOWN;  // both alive: needs a question here (or deeper)
+}
+
+// nodes whose question is needed to resolve the root, in deterministic order
+function collectAskable(nd, out) {
+  if (!nd.l || nd.w) return;
+  const a = val(nd.l), b = val(nd.r);
+  if (a === UNKNOWN) collectAskable(nd.l, out);
+  if (b === UNKNOWN) collectAskable(nd.r, out);
+  if (a !== UNKNOWN && b !== UNKNOWN && a !== null && b !== null) out.push(nd);
+}
+
+// remove the root's current best item, clearing winners along its path
+function popTree(nd) {
+  if (!nd.l) { nd.pos++; return; }
+  let side = nd.w;
+  if (!side) side = val(nd.l) === null ? 'R' : 'L';
+  nd.w = null;
+  popTree(side === 'L' ? nd.l : nd.r);
+}
+
+function leafRuns(nd, out) {
+  if (!nd.l) {
+    if (nd.pos < nd.run.length) out.push(nd.run.slice(nd.pos));
+    return;
+  }
+  leafRuns(nd.l, out);
+  leafRuns(nd.r, out);
+}
+
+// upper bound on questions left: fill every unresolved node, then each of the
+// remaining extractions costs at most the tree height
+function remainingTop() {
+  let m = 0, unresolved = 0, height = 0;
+  (function scan(nd, d) {
+    if (!nd.l) {
+      m += nd.run.length - nd.pos;
+      height = Math.max(height, d);
+      return;
+    }
+    if (!nd.w) unresolved++;
+    scan(nd.l, d + 1);
+    scan(nd.r, d + 1);
+  })(tree, 0);
+  return m <= 1 ? 0 : unresolved + (m - 1) * height;
+}
+
+function askTop(forced) {
+  while (true) {
+    const v = val(tree);
+    if (v === UNKNOWN) break;
+    if (v === null) { finish(ranked); return; }
+    ranked.push(v);
+    popTree(tree);
+  }
+  saveState();
+  const cands = [];
+  collectAskable(tree, cands);
+  const qi = forced ? forced.qi : Math.floor(Math.random() * cands.length);
+  const nd = cands[qi];
+  const aOnLeft = forced ? forced.aOnLeft : Math.random() < 0.5;
+  lastQ = { qi, aOnLeft };
+  show('question-screen');
+  document.getElementById('undo-btn').disabled = history.length === 0;
+  document.getElementById('progress').textContent =
+    `🏆 ${ranked.length} · ❓ ${asked + 1} · ⏳ ≤ ${remainingTop()}`;
+  const a = document.getElementById('choice-a');
+  const b = document.getElementById('choice-b');
+  const A = val(nd.l), B = val(nd.r);
+  a.textContent = aOnLeft ? A : B;
+  b.textContent = aOnLeft ? B : A;
+  a.onclick = () => answerTop(nd, aOnLeft);
+  b.onclick = () => answerTop(nd, !aOnLeft);
+}
+
+function answerTop(nd, lWon) {
+  history.push({
+    snap: JSON.stringify(stateObj()),
+    qi: lastQ.qi,
+    aOnLeft: lastQ.aOnLeft,
+  });
+  asked++;
+  nd.w = lWon ? 'L' : 'R';
+  askTop();
+}
+
+// ---- merge (varied) mode ----
 
 function startRound() {
   if (tasks.length === 0 && runs.length === 1) {
@@ -257,7 +409,7 @@ function ask(forced) {
 
 function answer(t, aWon) {
   history.push({
-    snap: JSON.stringify({ runs, tasks, asked }),
+    snap: JSON.stringify(stateObj()),
     qi: lastQ.qi,
     aOnLeft: lastQ.aOnLeft,
   });
@@ -276,6 +428,15 @@ function finish(ranking) {
 }
 
 function exportProgress() {
+  if (mode === 'top') {
+    // ranked-so-far is the first group; leaf remainders keep their order,
+    // but unpopped tournament winners are dropped and may get re-asked
+    const rs = [];
+    if (ranked.length) rs.push(ranked.slice());
+    leafRuns(tree, rs);
+    showResult(rs);
+    return;
+  }
   // snapshot everything as sorted runs; for an in-progress merge, out beats
   // all of a's remainder, so out + a-remainder is one run and b-remainder
   // is another (out-vs-b info is dropped and may get re-asked on resume)
