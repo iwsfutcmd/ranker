@@ -10,6 +10,18 @@
     max-width: 600px;
     margin: 40px auto;
     padding: 0 16px;
+    position: relative;
+  }
+  h1 { text-align: center; }
+  #export-btn {
+    position: absolute;
+    top: 0;
+    right: 16px;
+  }
+  #undo-btn {
+    display: block;
+    width: 100%;
+    margin-top: 12px;
   }
   textarea {
     width: 100%;
@@ -49,13 +61,13 @@
 </div>
 
 <div id="question-screen" class="hidden">
+  <button id="export-btn" onclick="exportProgress()" title="Export progress">📤</button>
   <div id="progress"></div>
   <div id="choices">
     <button class="choice" id="choice-a" title="←"></button>
     <button class="choice" id="choice-b" title="→"></button>
   </div>
-  <p><button id="undo-btn" onclick="undo()" title="Undo (Backspace)">↩</button>
-  <button onclick="exportProgress()" title="Export progress">📤</button></p>
+  <button id="undo-btn" onclick="undo()" title="Undo (Backspace)">↩</button>
 </div>
 
 <div id="result-screen" class="hidden">
