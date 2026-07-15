@@ -51,10 +51,10 @@
 <div id="question-screen" class="hidden">
   <div id="progress"></div>
   <div id="choices">
-    <button class="choice" id="choice-a"></button>
-    <button class="choice" id="choice-b"></button>
+    <button class="choice" id="choice-a" title="←"></button>
+    <button class="choice" id="choice-b" title="→"></button>
   </div>
-  <p><button id="undo-btn" onclick="undo()" title="Undo">↩</button>
+  <p><button id="undo-btn" onclick="undo()" title="Undo (Backspace)">↩</button>
   <button onclick="exportProgress()" title="Export progress">📤</button></p>
 </div>
 
@@ -289,6 +289,24 @@ function showResult(rs) {
     'hidden', !(complete && history.length > 0));
   show('result-screen');
 }
+
+document.addEventListener('keydown', e => {
+  const onQuestion =
+    !document.getElementById('question-screen').classList.contains('hidden');
+  const resultUndoVisible =
+    !document.getElementById('result-screen').classList.contains('hidden') &&
+    !document.getElementById('result-undo-btn').classList.contains('hidden');
+  if (onQuestion && e.key === 'ArrowLeft') {
+    e.preventDefault();
+    document.getElementById('choice-a').click();
+  } else if (onQuestion && e.key === 'ArrowRight') {
+    e.preventDefault();
+    document.getElementById('choice-b').click();
+  } else if (e.key === 'Backspace' && (onQuestion || resultUndoVisible)) {
+    e.preventDefault();
+    undo();
+  }
+});
 
 try {
   if (localStorage.getItem(STORAGE_KEY)) {

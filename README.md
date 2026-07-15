@@ -19,6 +19,7 @@ full ranking. A single HTML file with no dependencies.
   the start page to resume from it (or to add new items below a `---` under a
   finished ranking).
 - ↩ undoes any answer, all the way back to the first question.
+- Keyboard: ← / → pick the left/right item, Backspace undoes.
 - The UI is Unicode symbols only (English hints live in hover tooltips).
 
 ## License
