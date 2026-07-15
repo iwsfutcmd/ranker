@@ -10,6 +10,11 @@ full ranking. A single HTML file with no dependencies.
 - Uses interleaved merge sort, so a ranking of *n* items takes at most
   ~*n*·log₂(*n*) questions — within ~10% of the information-theoretic minimum.
   Assumes preferences are transitive with no ties.
+- 🥇▶ starts in top-first mode instead: a tournament that confirms the best
+  item first, then the next, and so on (🏆 count in the progress line). The
+  top *k* items cost only ~*n* + *k*·log₂(*n*) questions, so if you mainly
+  care about the top of the list, export and stop whenever you have enough.
+  The full ranking costs about the same as normal mode.
 - Questions are drawn from a randomly chosen in-progress merge, and sides are
   randomized, so consecutive questions rarely repeat items.
 - Progress auto-saves to `localStorage`; a 💾▶ button appears on the start
